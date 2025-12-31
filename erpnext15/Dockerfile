@@ -22,7 +22,7 @@ COPY installdata/install-erpnext15.sh /usr/local/bin/
 RUN chmod +x /usr/local/bin/install-erpnext15.sh
 
 # 执行安装脚本（构建阶段：仅安装依赖，跳过数据库）
-RUN /usr/local/bin/install-erpnext15.sh
+RUN bash -x /usr/local/bin/install-erpnext15.sh
 
 # 暴露ERPNext默认端口
 EXPOSE 80 8000
