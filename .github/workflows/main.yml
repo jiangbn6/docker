@@ -1,0 +1,205 @@
+name: Build and Push Docker Image
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:  # 允许手动触发
+  schedule:
+    # 每周一凌晨3点自动构建（保持缓存更新）
+    - cron: '0 3 * * 1'
+
+env:
+  REGISTRY: ghcr.io
+  # 使用小写仓库名（GitHub Container Registry要求）
+  IMAGE_NAME: ${{ github.repository_owner }}/${{ github.event.repository.name }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      
+    strategy:
+      matrix:
+        platform: [linux/amd64, linux/arm64]
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          driver-opts: |
+            image=moby/buildkit:master
+            network=host
+
+      - name: Log in to GitHub Container Registry
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            # 为默认分支打 latest 标签
+            type=raw,value=latest,enable=${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+            # 为分支名打标签
+            type=ref,event=branch
+            # 为 PR 打标签
+            type=ref,event=pr
+            # 为 git 标签打标签
+            type=ref,event=tag
+            # 为 git 描述打标签
+            type=ref,event=pr-merged
+            # 使用 sha 作为标签
+            type=sha,prefix={{branch}}-,suffix=-{{sha}},format=short
+            # 使用日期作为标签
+            type=raw,value={{date 'YYYYMMDD'}}-{{sha 7}}
+
+      - name: Build and push Docker image
+        id: build-and-push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            BUILDKIT_INLINE_CACHE=1
+          provenance: false  # 禁用 provenance 以避免权限问题
+
+      - name: Image digest
+        run: echo ${{ steps.build-and-push.outputs.digest }}
+
+  test:
+    runs-on: ubuntu-latest
+    needs: build
+    
+    services:
+      mysql:
+        image: mariadb:10.6.24
+        env:
+          MYSQL_ROOT_PASSWORD: testpassword123
+          MYSQL_DATABASE: erpnext_test
+        options: >-
+          --health-cmd="mysqladmin ping -h localhost -u root -ptestpassword123"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+        ports:
+          - 3306:3306
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image for testing
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          platforms: linux/amd64
+          push: false
+          tags: erpnext-test:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Wait for MySQL to be ready
+        run: |
+          for i in {1..30}; do
+            if mysql -h 127.0.0.1 -P 3306 -u root -ptestpassword123 -e "SELECT 1" 2>/dev/null; then
+              echo "✅ MySQL is ready!"
+              break
+            fi
+            echo "⏳ Waiting for MySQL... ($i/30)"
+            sleep 2
+          done
+
+      - name: Run container health check
+        run: |
+          # 运行容器进行健康检查
+          docker run -d \
+            --name erpnext-test \
+            -e EXTERNAL_DB_HOST=host.docker.internal \
+            -e EXTERNAL_DB_PORT=3306 \
+            -e EXTERNAL_DB_USER=root \
+            -e EXTERNAL_DB_PASSWORD=testpassword123 \
+            -e ADMIN_PASSWORD=admin123 \
+            -p 8080:80 \
+            erpnext-test:latest
+          
+          # 等待应用启动
+          echo "Waiting for ERPNext to start..."
+          sleep 60
+          
+          # 检查容器状态
+          docker ps -a
+          docker logs erpnext-test --tail 50
+
+      - name: Cleanup test containers
+        if: always()
+        run: |
+          docker stop erpnext-test || true
+          docker rm erpnext-test || true
+
+  deploy-docs:
+    runs-on: ubuntu-latest
+    needs: [build, test]
+    if: github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Generate badge
+        run: |
+          # 生成构建状态徽章
+          echo "![Docker Build Status](https://github.com/${{ github.repository }}/workflows/Build%20and%20Push%20Docker%20Image/badge.svg)" > BUILD-STATUS.md
+          echo "![Docker Image Version](https://img.shields.io/github/v/release/${{ github.repository }}?label=Docker%20Image&logo=docker)" >> BUILD-STATUS.md
+          
+      - name: Update README with badges
+        run: |
+          # 如果 README.md 存在，在开头添加徽章
+          if [ -f README.md ]; then
+            # 备份原文件
+            cp README.md README.md.backup
+            
+            # 在开头添加徽章
+            cat BUILD-STATUS.md > README.md.new
+            echo "" >> README.md.new
+            echo "" >> README.md.new
+            cat README.md.backup >> README.md.new
+            
+            # 替换原文件
+            mv README.md.new README.md
+            rm -f README.md.backup BUILD-STATUS.md
+          fi
+
+      - name: Commit and push if changed
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add README.md
+          git diff --quiet && git diff --staged --quiet || (git commit -m "docs: update build badges [skip ci]" && git push)
