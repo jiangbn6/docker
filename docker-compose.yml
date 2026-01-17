@@ -1,0 +1,40 @@
+version: '3.8'
+
+services:
+  mariadb:
+    image: mariadb:10.6
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: jiangbn6
+    command:
+      --character-set-server=utf8mb4
+      --collation-server=utf8mb4_unicode_ci
+      --bind-address=0.0.0.0
+    volumes:
+      - mariadb_data:/var/lib/mysql
+    networks:
+      - erpnet
+
+  erpnext:
+    build:
+      context: .
+      dockerfile: erpnext15/Dockerfile
+    restart: always
+    depends_on:
+      - mariadb
+    ports:
+      - "8080:80"          # 主机 8080 → 容器 80 (nginx)
+    environment:
+      - DB_HOST=mariadb   # 必须与 mariadb 服务名一致
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
+    networks:
+      - erpnet
+
+volumes:
+  mariadb_data:
+  sites:
+
+networks:
+  erpnet:
+    driver: bridge
