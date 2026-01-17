@@ -1,18 +1,31 @@
-name: Docker Image CI
+name: Build and Push ERPNext15 Image
 
 on:
   push:
     branches: [ "master" ]
-  pull_request:
-    branches: [ "master" ]
+  workflow_dispatch:
 
 jobs:
-  build:
+  build-and-push:
     runs-on: ubuntu-22.04
+
+    permissions:
+      contents: read
+      packages: write  # 必须！允许写入 GHCR
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-      
-      - name: Build the Docker image
-        run: docker build ./erpnext15 --file ./erpnext15/Dockerfile --tag my-image-name:$(date +%s)
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push Docker image
+        run: |
+          IMAGE=ghcr.io/${{ github.repository_owner }}/erpnext15:latest
+          docker build ./erpnext15 --file ./erpnext15/Dockerfile --tag $IMAGE
+          docker push $IMAGE
